@@ -1,0 +1,588 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r setup, include = FALSE}
+
+knitr::opts_chunk$set(cache = TRUE, warning = FALSE, message = FALSE)
+library(data.table);library(tidyverse); library(pacman)
+p_load(tm, ggspatial, sf, raster, cowplot, tmap, tidyverse, exactextractr, glue, sdm, ggthemes, ggsci, cowplot)
+
+
+```
+
+
+```{r datasets}
+
+
+# path <- "/Volumes/LaCie/E011/willow-tit-files"
+# load(glue::glue(path, "/taxa.RData"))
+# parus <- read_rds(glue::glue(path, "/taxa1.rds"))
+# 
+# df_gsw <- data.frame(taxon = data$`Scientific name`, 
+#                  name = data$`Common name`, 
+#                  x = data$`Longitude (WGS84)`, 
+#                  y = data$`Latitude (WGS84)`, 
+#                  area = data$`OSGR 100km`,
+#                  hectad = data$`OSGR 10km`, 
+#                  plot = data$`OSGR 1km`, 
+#                  error = data$`Coordinate uncertainty (m)`, 
+#                  verification = data$`Identification verification status`, 
+#                  year = data$`Start date year`, 
+#                  month = data$`Start date month`,
+#                  dataset = data$`Dataset name`)
+# 
+# df_parus <- parus %>%
+#   janitor::clean_names() %>%
+#   dplyr::select(taxon = scientific_name, 
+#          name = common_name, 
+#          x = longitude_wgs84, 
+#          y = latitude_wgs84, 
+#          area = osgr_100km, 
+#          hectad = osgr_10km, 
+#          plot = osgr_1km, 
+#          error = coordinate_uncertainty_m, 
+#          verification = identification_verification_status, 
+#          year = start_date_year, 
+#          month = start_date_month,
+#          dataset = dataset_name)
+# 
+# df <- bind_rows(df_parus, df_gsw)
+# here::here()
+df <- read_rds("data/occurrence_parus_gsw.rds")
+s <- read_rds("data/raster_stack.rds")
+  
+```
+
+```{r, landcover rasters, eval = FALSE}
+
+rast <- here::here("rasters/landcover")                    ## change path to raster directory
+rast_files <- list.files(rast, "*", full.names = T)        ## read file names  
+rast_lc <- map(rast_files, raster)                         ## load files
+
+
+lc_classes <- data.frame(
+  id = c(0:10), 
+  class = c(NA, "Broadleaf woodland", "Coniferous woodland", "Arable", "Improved grassland", 
+            "Semi-natural grassland", "Mountain, heath, bog", "Saltwater", "Freshwater", 
+            "Coastal", "Built-up areas and gardens")
+  
+  
+)
+
+
+cellStats(rast_lc[[5]], min)
+
+## change class 0 to NA
+rast_lc[[1]][rast_lc[[1]] == 0] <- NA
+rast_lc[[5]][rast_lc[[5]] == 0] <- NA
+rast_lc[[6]][rast_lc[[6]] == 0] <- NA
+rast_lc[[7]][rast_lc[[7]] == 0] <- NA
+
+lc1990 <- rast_lc[[1]]
+lc2007 <- rast_lc[[6]]
+lc2015 <- rast_lc[[7]]
+
+lc1990f <- as.factor(rast_lc[[1]])
+lc2000f <- as.factor(rast_lc[[5]])
+lc2007f <- as.factor(rast_lc[[6]])
+lc2015f <- as.factor(rast_lc[[7]])
+
+hist(lc2007f)
+
+
+```
+
+
+
+```{r shape}
+
+shp <- here::here("shp")                    ## change path to raster directory
+shp_files <- list.files(shp, "shp", full.names = T)        ## read file names  
+shps <- map(shp_files, st_read, quiet = TRUE) 
+
+shps <- map(shps, st_transform, crs = 27700)
+
+gb <- st_read(glue::glue(shp, "/gb-outlines_4219078/greatbritain.shp"), quiet = TRUE)
+gb <- st_transform(gb, 27700)
+gb1 <- st_transform(gb, 4326)
+
+## convert multipolygons to single polygon
+density7090 <- shps[[13]] %>% st_transform(27700) %>% st_combine() %>% st_union() %>%st_cast(., "POLYGON")
+density2000 <- shps[[11]] %>% st_transform(27700) %>% st_union() %>% st_cast(., "POLYGON")
+density2010 <- shps[[12]] %>% st_transform(27700) %>% st_union() %>% st_cast(., "POLYGON")
+```
+
+
+## Change in landcover over time and link to kdes.
+
+```{r landcover-proportions}
+
+dflc1990f <- as.data.frame(lc1990, xy = T) %>% drop_na()
+dflc2015f <- as.data.frame(lc2015, xy = T) %>% drop_na()
+ 
+count1990 <- count(dflc1990f, gb1990lcm1km_agg_dominant)
+count2015 <- count(dflc2015f, lcm2015_gb_1km_dominant_aggregate_class)
+change_lc <- bind_cols(count1990, count2015)
+change_lc %>%
+  mutate(prop1990 = n...2/sum(n...2), 
+         prop2015 = n...4/sum(n...4), 
+         diff = round(100 * (prop2015 - prop1990), 2), 
+         change = ifelse(diff > 0,  "increase", "decrease")) %>%
+  ggplot(aes(factor(gb1990lcm1km_agg_dominant), diff, fill = change)) +
+  geom_col()
+
+lckde1990 <- extract(lc1990, shps[[13]])    ## 1970 kde with 1990 landscape
+wt1990 <- map_df(lckde1990, table) %>%
+ pivot_longer(names_to = "lc", values_to = "count", cols = 1:ncol(.)) %>%
+  group_by(lc) %>%
+  summarise(total = sum(count, na.rm = T)) %>%
+  mutate(lc = as.factor(as.numeric(lc))) %>%
+  arrange(lc) %>%
+  mutate(lc_prop = round(100 *total/ sum(total) ,2))
+
+lckde2015 <- extract(lc2015, shps[[13]])     ## 2015 kde with 2015 landscape
+wt2015 <- map_df(lckde2015, table) %>%
+ pivot_longer(names_to = "lc", values_to = "count", cols = 1:ncol(.)) %>%
+  group_by(lc) %>%
+  summarise(total = sum(count, na.rm = T)) %>%
+  mutate(lc = as.factor(as.numeric(lc))) %>%
+  arrange(lc) %>%
+  mutate(lc_prop = round(100 *total/ sum(total) ,2))
+
+bind_cols(wt1990, wt2015) %>% 
+  mutate(diff = lc_prop...6 - lc_prop...3, 
+         change = ifelse(diff > 0,  "increase", "decrease")) %>%
+  ggplot(aes(lc...1, diff, fill = change)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_manual(values = c("red", "blue")) +
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(fill = NA)) +
+  ggsci::scale_fill_lancet() +
+  labs(y = "Difference between 1990 and 2015 (%)", 
+       x = "Landcover class")
+ 
+  
+  
+  
+  
+```
+
+
+```{r climate data, eval=FALSE}
+library(raster)
+
+current_climate <- getData('worldclim', var = 'bio', res = 2.5)
+
+current_climate1 <- getData('worldclim', var = 'bio', res = 0.5, lon = 0, lat = 60)
+
+future_climate <- getData('CMIP5', var = 'bio', res = 2.5, rcp = 85, model = 'AC', year = 50)
+
+
+rast_tx <- function(from, target){
+  template <- raster(extent(from), resolution = 1000, 
+                          crs = st_crs(from)$proj4string)
+  rast.proj <- projectRaster(from = target, to = template)
+                      
+}
+
+bio1s <- rast_tx(rast_lc[[1]], current_climate[[1]])
+bio18s <- rast_tx(rast_lc[[1]], current_climate[[18]])
+
+
+r <- raster(ncols = 700, nrow = 1300, xmn=0, xmx=700000,ymn=0,ymx=1300000 )
+
+```
+
+
+```{r blue-tit-site}
+
+df <- setDT(df)
+
+site_analysis <- df[(name == "Blue Tit"|name == "Great Spotted Woodpecker"|name == "Willow Tit") & between(year, 2010, 2019), .N, by = .(plot, name)] %>%
+  pivot_wider(names_from = "name", values_from = "N", values_fill = 0) %>%
+  mutate(wt_pres = ifelse(`Willow Tit` == 0, "Absent", "Present")) %>%
+  filter(nchar(plot) > 0)
+
+site_analysis[which(site_analysis$`Blue Tit` > 10000),]
+
+site_analysis %>%
+  pivot_longer(names_to = "taxa", values_to = "count", cols = c(2, 4)) %>%
+  drop_na() %>%
+  mutate(count = log(count)) %>%
+  ggplot() +
+  geom_boxplot(aes(wt_pres, count, fill = taxa)) +
+  coord_flip() +
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(fill = NA))
+```
+
+
+```{r counts, eval=FALSE}
+
+## calculate counts per 1 km2
+gsw_counts <- df[nchar(plot) > 0 & name == "Great Spotted Woodpecker" & between(year, 2000, 2019), .N, by = .(x, y) ] %>% data.frame() %>% mutate_if(is.numeric, round, 5)
+bt_counts <- df[nchar(plot) > 0 & name == "Blue Tit" & between(year, 2000, 2019), .N, by = .(x, y) ] %>% data.frame() %>% mutate_if(is.numeric, round, 5)
+  
+## transform to spatial data frame
+g <- gsw_counts %>%
+  st_as_sf(., coords = c("x", "y"), crs = 4326)
+
+g1 <- g %>% st_transform(., crs = 27700)
+g2 <- as(g1, "Spatial")
+
+b <- bt_counts %>%
+  st_as_sf(., coords = c("x", "y"), crs = 4326)
+
+b1 <- b %>% st_transform(., crs = 27700)
+b2 <- as(b1, "Spatial")
+
+
+## set to template raster (from LC data)
+r <- raster(ncols = 700, nrow = 1300, xmn=0, xmx=700000,ymn=0,ymx=1300000 )
+
+## rasterize
+gsw_rast <- rasterize(g2, r, "N", fun = sum)### save these
+bt_rast <- rasterize(b2, r, "N", fun = sum)
+
+
+## plot
+plot(bt_rast, col = viridis::viridis(20, direction = -1), axes = F, box = F)
+
+tm_shape(bt_rast) +
+  tm_raster(palette = viridis::rocket(10, direction = -1))
+
+
+
+
+```
+
+```{r}
+s <- stack(rast_lc[[1]], rast_lc[[7]], rast_lc[[6]], blue_tit = bt_rast, gsw_rast, bio1s, bio18s)
+
+write_rds(s, "raster_stack.rds")
+
+names(s) <- c("lc1990", "lc2015", "lc2007", "Blue Tit", "Grt Spotted Woodpecker", "Temperature", "Rainfall")
+
+plot(s, col = viridis::turbo(12, direction = 1))
+```
+
+
+
+```{r plot-lc-rasters}
+## plot
+lc1990p <- tmap::tm_shape(lc1990) +
+  tm_raster(n = 10, palette = RColorBrewer::brewer.pal(10, "RdYlGn"), showNA = FALSE, colorNA = "white", drop.levels = T, title = "Land cover classes") +
+  tm_scale_bar(position = c("right", "bottom")) +
+  tm_compass(position = c("right", "top"))
+
+# lc2007 <- tmap::tm_shape(rast_lc[[6]]) +
+#   tm_raster(n = 10, palette = RColorBrewer::brewer.pal(10, "RdYlGn"), showNA = F, textNA = F, colorNA = "white", drop.levels = T, title = "Land cover classes") 
+
+lc2015p <- tmap::tm_shape(lc2015) +
+  tm_raster(n = 10, palette = RColorBrewer::brewer.pal(10, "RdYlGn"), showNA = FALSE, colorNA = "white", drop.levels = T, title = "Land cover classes") +
+  tm_scale_bar(position = c("right", "bottom")) +
+  tm_compass(position = c("right", "top"))
+
+
+tmap_arrange(lc1990, lc2015)
+
+
+```
+
+```{r landcover-change-1990-2015, eval=FALSE}
+
+lc1990df <- as.data.frame(rast_lc[[1]], xy=TRUE)
+
+lc2015df <- as.data.frame(rast_lc[[7]], xy=TRUE)
+
+c1 <- lc1990df %>%
+  count(gb1990lcm1km_agg_dominant) 
+  
+
+c2 <- lc2015df %>%
+  count(lcm2015_gb_1km_dominant_aggregate_class
+)
+
+c1 %>% bind_cols(c2) %>%
+  mutate(dist1 = n...2/sum(n...2), 
+         dist2 = n...4/sum(n...4), 
+         diff = 100 * (dist2 - dist1)) %>%
+  left_join(lc_classes, by = c("gb1990lcm1km_agg_dominant" = "id")) %>%
+  mutate(change = ifelse(diff >0, "increase", "decrease")) %>%
+  drop_na() %>%
+  ggplot(aes(class, diff)) +
+  geom_col(aes(fill = change), show.legend = F) +
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(fill = NA), 
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("red", "blue")) +
+  labs(title = "Change in proportion of landscape cover between 1990 and 2015", 
+       y = "Percentage change", 
+       x = "")
+
+```
+
+
+
+```{r plot density}
+p1 <- ggplot(gb) +
+  geom_sf(alpha = 0) +
+  geom_sf(data =density7090, fill = "blue") +
+  coord_sf() +
+  theme_void() 
+
+p2 <- ggplot(gb) +
+  geom_sf(alpha = 0) +
+  geom_sf(data =density2000, fill = "blue") +
+  coord_sf() +
+  theme_void()
+
+p3 <- ggplot(gb) +
+  geom_sf(alpha = 0) +
+  geom_sf(data =density2010, fill = "blue") +
+  coord_sf() +
+  theme_void()
+
+plot_row <- plot_grid(p1, p2, p3, nrow = 1, 
+          labels = c("1970-1990", "2000-2009", "2010-2019" )) 
+
+title <- ggdraw() +
+  draw_label(
+  "Core Willow Tit density, 1970 - 2019", 
+  fontface = "bold", 
+  x = 0, hjust = 0
+  )
+
+plot_grid(title, plot_row,
+          ncol = 1, 
+          rel_heights = c(0.1, 1))
+  
+
+```
+
+```{r landcover-density, eval = F}
+
+v7090 <- exact_extract(rast_lc[[1]], density7090)
+
+cover7090 <- map_dfr(v7090, data.frame) %>%
+  count(value) %>%
+  drop_na()
+
+v2010 <- exact_extract(rast_lc[[5]], density2010)
+
+cover2010 <- map_dfr(v2010, data.frame) %>%
+  count(value) 
+
+bind_cols(cover7090, cover2010) %>%
+  mutate(class70 = n...2/sum(n...2), 
+         class2015 = n...4/sum(n...4), 
+         diff = 100 *(class2015 - class70)) %>%
+  left_join(lc_classes, by = c("value...1" = "id")) %>%
+  mutate(change = ifelse(diff >0, "increase", "decrease")) %>%
+  drop_na() %>%
+  ggplot(aes(class, diff)) +
+  geom_col(aes(fill = change), show.legend = F) +
+  theme(panel.background = element_blank(),
+        panel.border = element_rect(fill = NA), 
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("red", "blue")) +
+  labs(title = "Change in Willow Tit habitat between 1970 and 2015", 
+       y = "Percentage change", 
+       x = "")
+
+
+```
+
+```{r prep species data}
+
+species <- shps[[9]] %>% 
+  dplyr::select(geometry) %>%
+  mutate(species = 1) %>%
+  as(., "Spatial")
+
+
+plot(species)
+
+```
+
+```{r prep sdm data}
+library(sdm)
+
+d <- sdmData(species ~ ., train = species, predictors = s, bg = list(n = 4000, remove = T) )
+
+d %>% write_rds("data/sdm_data.rds")
+
+```
+
+```{r model-1}
+d <- read_rds("data/sdm_data.rds")
+sdm::installAll()
+library(tictoc)
+tic()
+mod1 <- sdm::sdm(species ~ ., data = d, methods = c("brt", "gam", "glmnet"), kfolds = 5, parallelSettings = list(ncore = 7, methods = "parallel"))
+toc()
+
+```
+
+
+```{r}
+
+mod1 %>% write_rds('mod1.rds')
+  
+```
+
+
+```{r model-ranger}
+
+tic()
+mod_ranger <- sdm::sdm(species ~ ., data = d, methods = c("ranger"), kfolds = 5, parallelSettings = list(ncore = 7, methods = "parallel"))
+toc()
+
+```
+
+```{r evaluation}
+
+## performance 
+sdm::roc(mod1)
+
+```
+
+
+```{r vimp}
+
+vimp <- sdm::getVarImp(mod1)
+
+vimp@varImportanceMean$AUCtest %>%
+  ggplot(aes(reorder(variables, AUCtest), AUCtest) ) +
+  geom_point() +
+  geom_linerange(aes(ymin = lower, ymax = upper)) +
+  coord_flip() +
+  labs(title = "Importance of predictor variables", 
+       subtitle = "Averaged across models", 
+       x = "")
+```
+
+
+```{r model-maxent, eval = FALSE}
+library(dismo); library(maxent)
+dismo::maxent()
+tic()
+mod_maxent <- sdm::sdm(species ~ ., data = d, methods = c("maxent"), kfolds = 3, parallelSettings = list(ncore = 7, methods = "parallel"))
+toc()
+
+```
+
+```{r rc}
+rc <- sdm::getResponseCurve(mod1)
+
+pl2015 <- rc@response$lc2015 %>%
+  mutate(lc = cut(lc2015, breaks = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9 , 10))) %>%
+  dplyr::select(-lc2015) %>%
+  pivot_longer(names_to = "metric", values_to = "vals", cols = 1:15) %>%
+  mutate(metric = str_extract(metric, "^[[:alpha:]].*_")) %>%
+  filter(!str_detect(metric, "glm")) %>%
+  group_by(lc) %>%
+  summarise(resp = mean(vals)) %>%
+  ggplot(aes(lc, resp)) +
+  geom_col(position = "dodge")
+  
+  
+pl1990 <- rc@response$lc1990 %>%
+  mutate(lc = cut(lc1990, breaks = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9 , 10))) %>%
+  dplyr::select(-lc1990) %>%
+  pivot_longer(names_to = "metric", values_to = "vals", cols = 1:15) %>%
+  mutate(metric = str_extract(metric, "^[[:alpha:]].*_")) %>%
+  filter(!str_detect(metric, "glm")) %>%
+  group_by(lc) %>%
+  summarise(resp = mean(vals)) %>%
+  ggplot(aes(lc, resp)) +
+  geom_col(position = "dodge")
+
+
+plot_grid(pl2015, pl1990)
+
+
+  ```
+
+
+
+```{r rc}
+rc <- sdm::getResponseCurve(mod1)
+
+
+rcurve(rc)
+
+
+```
+
+```{r ranger, eval = F}
+roc(mod_ranger)
+
+getVarImp(mod_ranger)@varImportanceMean$AUCtest %>%
+  ggplot(aes(reorder(variables, AUCtest), AUCtest) ) +
+  geom_point() +
+  geom_linerange(aes(ymin = lower, ymax = upper)) +
+  coord_flip() +
+  labs(title = "Importance of predictor variables", 
+       subtitle = "Averaged across models", 
+       x = "")
+
+
+
+```
+
+
+
+
+```{r predict-habitat}
+
+
+newdata <- s
+
+
+library(tictoc)
+tic()
+predict <- predict(mod1, newdata = newdata, filename = "habitat.tif", nc = 8, overwite = TRUE, mean = TRUE)
+toc()
+
+
+```
+
+```{r}
+
+habitat <- raster::raster("habitat.tif")
+
+raster::plot(habitat)
+
+tmap::tm_shape(habitat) +
+  tm_raster(palette = "RdYlGn")
+
+```
+
+
+```{r ggplot}
+library(raster); library(sf)
+predict_df <- as.data.frame(habitat, xy = TRUE) %>%
+  drop_na()
+head(predict_df)
+
+predict_sf <- predict_df %>%
+  st_as_sf(., coords = c("x", "y"), crs = 27700)
+
+pred1 <- predict_sf %>%
+  ggplot() +
+  geom_sf(aes(colour = habitat), pch = 15) +
+  geom_sf(data = gb, alpha = 0) +
+  geom_sf(data = shps[[9]], shape = "+", size = .3) +
+  coord_sf() +
+  theme_void() +
+  viridis::scale_colour_viridis(option = "turbo", direction = -1) 
+
+pred1
+
+```
+
+
