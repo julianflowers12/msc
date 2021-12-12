@@ -1,0 +1,232 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Rapid species distribution modelling in R using the `sdm` package
+
+## Loading libraries
+
+## Loading data
+
+## Data preparation
+### Building input data
+
+## Create SDM data input
+
+## Modelling
+
+## Prediction
+
+## Climate change modelling
+
+
+
+
+```{r}
+library(pacman)
+p_load(sdm, tidyverse, tmap, viridis, sf, htmltools)
+installAll()
+gb <- st_read("https://opendata.arcgis.com/datasets/f03c3abfc3554841b83a43921bbd1817_0.geojson")
+gb <- st_union(gb)
+
+
+```
+
+```{r}
+raster_stack[[4]]
+
+
+```
+
+```{r fig.height=6, fig.width=6}
+
+sdm::roc(mod_combined)
+
+mod_combined <- mod1 + mod_ranger
+
+getModelInfo(mod_combined)
+
+g <- getVarImp(mod_combined)
+
+g@varImportanceMean$AUCtest %>%
+  ggplot(aes(reorder(variables, AUCtest), AUCtest)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lower, ymax = upper)) +
+  coord_flip() +
+  labs(x = NULL) +
+  theme(panel.background = element_blank(), 
+        panel.border = element_rect(fill = NA))
+
+str(g)
+
+plot(vip) 
+
+rc <- getResponseCurve(mod_combined[1:16])
+
+rc <- rcurve(x = mod_combined, id = c(1:12), mean = T) +
+  ggtitle("Response curves") + 
+  theme(panel.background = element_blank(), 
+        panel.border = element_rect(fill = NA))
+  
+rc$data %>%
+  filter(variable %in% c("Rainfall", "Temperature")) %>%
+  mutate(Value = ifelse(variable == "Temperature", (Value -32) * (9/5), Value)) %>%
+  ggplot(aes(Value,Response)) +
+  geom_line(aes(group = variable)) +
+  facet_wrap(~variable, scales = "free")
+
+
+
+  
+
+```
+
+
+
+```{r, cache=TRUE}
+habitat <- raster("habitat.tif")
+habitat[is.na(habitat)] <- NA
+
+
+habitatc <- crop(habitat, st_bbox(gb))
+
+
+habitat_df <- as.data.frame(habitat, xy = T)
+
+tm_shape(habitat) +
+  tm_raster(style = "fisher", palette = rocket(10, direction = -1), colorNA = NULL)
+  
+
+habitat_sf <- habitat_df %>%
+  st_as_sf(., coords = c("x", "y"), crs = 27700)
+
+habitat_sf %>%
+  ggplot() +
+  geom_sf(aes(colour = habitat), pch = 15, size = 3) + 
+  geom_sf(data = gb, alpha = 0) +
+  coord_sf() +
+  theme_void() +
+  scale_colour_viridis(option = "turbo", direction = -1)
+
+```
+
+```{r quick sdm}
+
+
+clim1 <- raster::getData('worldclim', var = "bio", res = 2.5)
+climf1 <- raster::getData('CMIP5', var = "bio", res = 2.5, rcp = 85, model = "AC", year = 50)
+clim1 <- clim1[[c(1,18)]]
+climf1 <- climf1[[c(1, 18)]]
+names(climf1) <- names(clim1)
+
+
+str(sdm_data)
+sd <- sdm_data@info@coords %>%
+  data.frame() %>%
+  mutate(pres = ifelse(rID < 2604, 1, 0)) %>%
+  left_join(sdm_data@features)
+
+species <- st_as_sf(sd, coords = c("coords.x1", "coords.x2"), crs = 27700 ) %>%
+  filter(pres ==1)
+sp <- species %>%
+  dplyr::select(geometry) %>%
+  mutate(species = 1) %>%
+  as(., "Spatial")
+
+rast_tx <- function(from, target){
+  
+  template <- raster(extent(from), resolution =1000, 
+                            crs = 27700)
+  rast_proj <- projectRaster(from  = target, to  = template)
+                     
+  
+}
+
+r1 <- rast_tx(sp, clim1[[1]])
+r2 <- rast_tx(sp, clim1[[2]])
+rf1 <- rast_tx(sp, climf1[[1]])
+rf2 <- rast_tx(sp, climf1[[2]])
+
+s <- stack(r1, r2)
+s1 <- stack(rf1, rf2)
+
+sd <- sdmData(species~ bio1 + bio18, train = sp, predictors = s, bg = list(n = 2000, remove = T))
+
+sdm <- sdm(species ~., data = sd, methods = c("maxent", "ranger"), kfolds = 3, parallelSettings = list(ncore = 7, methods = "parallel"))
+
+pred1 <- predict(sdm, newdata = s, filename = "habitat_maxent.tif", nc = 7, overwrite = T, mean = T)
+
+predf <- predict(sdm, newdata = s1, filename = "habitat_maxent_f.tif", nc = 7, overwrite = T, mean = T)
+
+
+
+```
+
+
+```{r}
+
+roc(sdm)
+rcurve(sdm)
+sdm::getVarImp(sdm)
+
+plot(pred1)
+plot(predf)
+
+predx <- predf - pred1
+
+plot(predx)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
