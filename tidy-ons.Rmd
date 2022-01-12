@@ -1,0 +1,251 @@
+---
+title: "Wrangling untidy data"
+author: "Julian Flowers"
+date: "2022/01/06 (updated: `r Sys.Date()`)"
+output:
+  xaringan::moon_reader:
+    lib_dir: libs
+    nature:
+      highlightStyle: github
+      highlightLines: true
+      countIncrementalSlides: false
+---
+
+```{r setup, include=FALSE}
+options(htmltools.dir.version = FALSE)
+knitr::opts_chunk$set(message = F, warning = F)
+library(pacman)
+p_load(tidyverse, readxl, janitor, patchwork)
+official_data <- read_csv("https://api.coronavirus.data.gov.uk/v2/data?areaType=region&metric=newCasesBySpecimenDateRollingRate&metric=uniqueCasePositivityBySpecimenDateRollingSum&format=csv", show_col_types = FALSE)
+
+```
+
+---
+
+# Get Started
+
+- Data in spreadsheets is often formatted for presentation, not for analysis
+- Analysing such data often requires reorgansing or *wrangling* data
+- Reorganised or *tidy* data is much easier to analyse
+- This presentation walks through a typical (and important) dataset
+
+
+---
+## The dataset
+
+- The dataset we will use is [the ONS COVID survey data](https://www.ons.gov.uk/file?uri=%2fpeoplepopulationandcommunity%2fhealthandsocialcare%2fconditionsanddiseases%2fdatasets%2fcoronaviruscovid19infectionsurveydata%2f2021/covid19infectionsurvey24122021england.xlsx)
+---
+## From spreadsheet...
+![](ons.png)
+
+
+---
+## To insight...
+![](omicron.png)
+
+
+---
+
+## The data tidying challenge
+
+Let us say we want to extract all the daily data in to a single data table for further analysis
+
+* It is spread across multiple sheets
+     - Variants by region (1h England)
+     - Variants by country (1g UK)
+     - Modelled prevalence by age (1f England)
+     - Modelled prevalence by region (1d England)
+     - Modelled prevalence for England (1b England)
+* Has extra lines of explanation within the body of data
+* There is variation in date formatting and a variety of heading names
+* On some sheets there are multiple header rows e.g. for region names and variable names
+
+To pull this together needs:
+
+- extracting the data from all the sheets
+- recoding and reformatting data
+- renaming variables
+- stacking the data
+
+---
+
+## First steps
+
+```{r}
+library(readxl)
+
+df <- tempfile()
+
+## download the file
+curl::curl_download("https://www.ons.gov.uk/file?uri=%2fpeoplepopulationandcommunity%2fhealthandsocialcare%2fconditionsanddiseases%2fdatasets%2fcoronaviruscovid19infectionsurveydata%2f2021/covid19infectionsurvey24122021england.xlsx", df)
+     
+## get relevant data sheets
+
+sheets <- excel_sheets(df)
+```
+---
+
+## Sheet 1B
+
+Let's start with sheet 1B
+
+```{r}
+dat <- read_excel(df, sheet = sheets[4], skip = 4)
+
+dat <- dat %>%
+  slice(-c(43:nrow(.)))  ## remove extraneous rows
+
+dat_1 <- dat %>%
+  drop_na() %>%
+  mutate(Date = excel_numeric_to_date(as.numeric(Date)))
+```
+
+
+---
+
+## Plot the result
+
+```{r fig.height=4, fig.width=6}
+dat_1 %>% clean_names() %>% 
+  ggplot(aes(date, modelled_percent_testing_positive_for_covid_19)) +
+  geom_point() +
+  geom_linerange(aes(ymin = x95_percent_lower_credible_interval_3, ymax = x95_percent_upper_credible_interval_4)) + 
+  ggtitle(
+    "Estimated prevalence of COVID with 95% credible intervals"
+          )
+
+```
+
+
+---
+
+### Regional data
+
+Now let's do the same for regional data - sheets 1d and 1h  
+We want to compare prevalence across the country and the rise of omicron
+
+
+
+```{r}
+
+sheets <- sheets[c(4, 6, 8, 9, 10)]
+
+## import data NB need to skip rows differently for different datasets
+## Also add sheet names
+## uses `purrr` package -> map() applies same function to each dataset
+
+data1 <- map(sheets[c(2, 5)], ~(read_excel(df, sheet = .x, skip = 5) %>% mutate(sheet = .x)))
+
+data1 <- map(data1, ~(.x %>% slice(-c(43:nrow(.)))))
+
+
+map(data1, dim)  ## checks data rectangles have the same dimension
+
+
+
+```
+
+---
+## Pivot data
+We can't simply stack the datasets - the variable names differ
+Trick is to pivot each dataset and then stack
+
+```{r}
+
+d <- map(data1, clean_names)
+d <- map(d, ~(.x %>% mutate(x1 = excel_numeric_to_date(as.numeric(x1) ))))
+d <- map(d, ~(.x %>% mutate_at(.vars = 2:82, as.numeric)))  ## make sure numeric variables are numeric
+
+## pivot
+
+dl <- map_dfr(d, ~(.x %>% pivot_longer(names_to = "metric", 
+                                       values_to = "vals", cols = 2:82)))  ## note ratios are converted to NA 
+rn <- c("NE", "NW", "YH", "EM", "WM", "EE", "L", "SE", "SW")
+rn1 <- official_data$areaName %>% unique()
+dl <- dl %>%
+  mutate(region = rep(rn, times = 84, each = 9), 
+         areaName = rep(rn1, times = 84, each = 9))  ## now we have a 
+## region code for each variable for each date
+```
+
+---
+
+### Pivoting data
+
+```{r}
+
+dl <- dl %>%
+  mutate(metric = str_remove(metric, "x95_percent_"), 
+         metric = str_remove(metric, "_\\d{1,}$"),
+         m1 = ifelse(str_detect(metric, "credible"), metric, "estimate"), 
+         metric = ifelse(!str_detect(metric, "credible"), metric, NA)) %>%
+  fill(metric) %>%
+  select(date = x1, everything()) %>%
+  filter(!is.na(vals)) %>%
+  pivot_wider(names_from = "m1", values_from = "vals")
+```
+
+---
+
+## Final plot
+
+```{r, echo=FALSE}
+dl %>%
+  filter(str_detect(metric, "percent")) %>%
+  ggplot(aes(date, estimate)) +
+  geom_point(show.legend = FALSE, pch = 1,size = .1) +
+  geom_linerange(aes(ymin = lower_credible_interval, ymax = upper_credible_interval), show.legend = FALSE) +
+  facet_grid(metric ~ region, labeller = label_wrap_gen(20))
+
+```
+
+
+---
+
+## Relationship between survey data and official stats
+
+* Compare test positivity and case rates by region
+
+```{r}
+
+
+rn1 <- official_data$areaName %>%
+  unique()
+
+dl1 <- dl %>%
+  select(date, areaName, metric, estimate)
+
+official_data_filtered <- official_data %>%
+  filter(date >= "2021-11-08", date <= "2021-12-18") %>%
+  left_join(dl1, by = c("date", "areaName")) %>%
+  pivot_wider(names_from = "metric", values_from = "estimate")
+```
+
+---
+
+```{r fig.height=6, fig.width=6}
+official_data_filtered %>%
+  ggplot() +
+  geom_point(aes(y = modelled_percent_testing_positive_for_covid_19_delta_variant_compatible, x = uniqueCasePositivityBySpecimenDateRollingSum), colour = "red") +
+  geom_point(aes(x = uniqueCasePositivityBySpecimenDateRollingSum, modelled_percent_testing_positive_for_covid_19_omicron_variant_compatible), pch = 16) +
+  geom_point(aes(x = uniqueCasePositivityBySpecimenDateRollingSum, modelled_percent_testing_positive_for_covid_19), pch = 1) +
+  facet_wrap(~ areaName)
+```
+
+
+---
+
+
+```{r}
+official_data_filtered %>%
+  ggplot() +
+  geom_line(aes(x = date, y = uniqueCasePositivityBySpecimenDateRollingSum), colour = "red") + facet_wrap(~ areaName) +
+  geom_line(aes(x = date, y = modelled_percent_testing_positive_for_covid_19_omicron_variant_compatible), colour = "blue") +
+  geom_line(aes(x = date, y =modelled_percent_testing_positive_for_covid_19_delta_variant_compatible), colour = "goldenrod") +
+  facet_wrap(~ areaName) + labs(y = "%", x = "Date")
+```
+
+
+
+
+
